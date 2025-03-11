@@ -284,7 +284,7 @@ class MaskAnnotator(BaseAnnotator):
         colored_mask = np.array(scene, copy=True, dtype=np.uint8)
 
         # for detection_idx in np.flip(np.argsort(detections.area)):
-        for detection_idx in np.argsort(detections.area):
+        for detection_idx in np.flip(np.argsort(detections.area)):
             color = resolve_color(
                 color=self.color,
                 detections=detections,

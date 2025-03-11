@@ -1,3 +1,19 @@
+"""
+如果运行程序时发现明明有包但报错，比如
+ModuleNotFoundError: No module named 'groundingdino'
+则按照官方github仓库再安装一遍几个地方
+https://github.com/IDEA-Research/Grounded-Segment-Anything
+Install without Docker那里：
+export AM_I_DOCKER=False
+export BUILD_WITH_CUDA=True
+export CUDA_HOME=/usr/local/cuda-12.1/
+python -m pip install -e segment_anything
+pip install --no-build-isolation -e GroundingDINO
+pip install -r ./recognize-anything/requirements.txt
+pip install -e ./recognize-anything/
+然后就可以了
+"""
+
 import os
 import sys
 
@@ -278,6 +294,7 @@ class RamGroundedSam:
         )
         ram_inference_result = inference_ram(image_to_ram, self.ram_model)
         ram_tags = ram_inference_result[0].replace(" |", ",")
+        ram_tags += ",human face"
         ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
         # Grounded DINO inference
         image_transform_pipeline = T.Compose(
@@ -343,6 +360,7 @@ class RamGroundedSam:
         ) < self.alg_args.max_area_percentage
         sv_detections = sv_detections[max_area_mask]
         ## draw masks
+        # 画mask要先画大mask再画小mask，不然如果大小mask重合的话，比如person和face，大mask会覆盖小mask
         # image_viz, sorted_masks_info = self._draw_masks(masks, pred_phrases, image_viz)
         mask_annotator = sv.MaskAnnotator(
             color_lookup=sv.ColorLookup.INDEX, opacity=self.alg_args.mask_opacity
