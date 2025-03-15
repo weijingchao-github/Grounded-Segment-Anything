@@ -294,7 +294,7 @@ class RamGroundedSam:
         )
         ram_inference_result = inference_ram(image_to_ram, self.ram_model)
         ram_tags = ram_inference_result[0].replace(" |", ",")
-        ram_tags += ",human face"
+        # ram_tags += ",human face"
         ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
         # Grounded DINO inference
         image_transform_pipeline = T.Compose(
