@@ -24,6 +24,15 @@ label，可能让大模型只关注人不关注物体的变化，另一方面就
 的话编号可能就不完整了，比如物体是0-20，人track_id有47.
 """
 
+"""
+后面可能需要做的：如果出现摄像头被遮住了的情况，RAM可能没有结果，Grounding DiNO
+可能没有结果，不让程序报错，并且返回原始的SoM图像
+"""
+
+"""
+如果Grounded DINO检测出了face and person没有检测出的人，那就留着它，留在SoM Image上。
+"""
+
 import os
 import sys
 
@@ -64,7 +73,7 @@ from ram.models import ram
 from segment_anything import SamPredictor, build_sam
 from sensor_msgs.msg import Image
 
-from face_and_person.msg import PersonBboxPerImage
+from face_and_person.msg import FacePersonBboxPerImage
 from Grounded_SAM.msg import ObjectIndexPair, SoM, TrackIDIndexPair
 
 
@@ -101,7 +110,7 @@ class RamGroundedSam:
         duration = rospy.get_param("/llm_inferecnce_duration")
         self.per_seq_recv_times = audio_image_pub_frequency * duration
         self.do_inference_flag = False
-        self.person_detect_result = None
+        self.face_person_detect_result = None
         # model init
         # RAM model
         self.ram_model = ram(
@@ -132,8 +141,8 @@ class RamGroundedSam:
         # ROS init
         self.bridge = CvBridge()
         rospy.Subscriber(
-            "/face_and_person/person_detect_result",
-            PersonBboxPerImage,
+            "/face_and_person/face_person_detect_result",
+            FacePersonBboxPerImage,
             self._process_recv_msg,
             queue_size=10,
         )
@@ -143,11 +152,11 @@ class RamGroundedSam:
         self.thread_running = False
         self.loop_thread.join()
 
-    def _process_recv_msg(self, person_detect_result):
+    def _process_recv_msg(self, face_person_detect_result):
         self.recv_counter += 1
         if self.recv_counter == self.per_seq_recv_times:
             self.do_inference_flag = True
-            self.person_detect_result = person_detect_result
+            self.face_person_detect_result = face_person_detect_result
             self.recv_counter = 0
 
     def _load_grounded_model(self, model_config_path, model_checkpoint_path, device):
@@ -227,7 +236,7 @@ class RamGroundedSam:
             self.do_inference_flag = False
 
             image_raw = self.bridge.imgmsg_to_cv2(
-                self.person_detect_result.color_image, desired_encoding="bgr8"
+                self.face_person_detect_result.color_image, desired_encoding="bgr8"
             )  # image color
             image_viz = copy.deepcopy(image_raw)
             image_cv2_rgb = cv2.cvtColor(image_raw, cv2.COLOR_BGR2RGB)
@@ -242,149 +251,218 @@ class RamGroundedSam:
                 " |", ","
             )  # 人并不单纯的只是person，还有man, woman, businessman什么的
             ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
-            # Grounded DINO inference
-            image_transform_pipeline = T.Compose(
-                [
-                    T.RandomResize([800], max_size=1333),
-                    T.ToTensor(),
-                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ]
-            )
-            image_to_grounded, _ = image_transform_pipeline(image_pil, None)  # 3, h, w
-            boxes_filt, scores, pred_phrases = self._get_grounding_output(
-                self.grounded_model,
-                image_to_grounded,
-                ram_tags,
-                self.alg_args.box_threshold,
-                self.alg_args.text_threshold,
-                device=self.alg_args.device,
-            )
-            size = image_pil.size
-            H, W = size[1], size[0]
-            for i in range(boxes_filt.size(0)):
-                boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
-                boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
-                boxes_filt[i][2:] += boxes_filt[i][:2]
-            boxes_filt = boxes_filt.cpu()
-            ## use NMS to handle overlapped boxes
-            # 在这里加入face_and_person中检测得到的bbox
+
             track_id_list = []
-            person_index_after_insert_in_pred_result = [
-                i
-                for i in range(
-                    len(boxes_filt),
-                    len(boxes_filt)
-                    + len(self.person_detect_result.bboxes_xyxy_and_ids),
-                )
-            ]
             for (
                 bbox_xyxy_and_id
             ) in (
-                self.person_detect_result.bboxes_xyxy_and_ids
+                self.face_person_detect_result.person_bboxes_xyxy_and_ids
             ):  # 接收到的列表里没有人这个loop也能处理
                 track_id_list.append(bbox_xyxy_and_id.track_id)
-                person_bbox_tensor = torch.tensor(
-                    bbox_xyxy_and_id.bbox_xyxy,
-                    dtype=boxes_filt.dtype,
-                    device=boxes_filt.device,
-                ).unsqueeze(0)
-                boxes_filt = torch.cat((boxes_filt, person_bbox_tensor), dim=0)
-                scores = torch.cat(scores, torch.tensor([1]), dim=0)
-                pred_phrases.append("person(1.00)")
-            # 这里有个问题，就是检测的bbox会不会相互之间会非最大抑制，这个问题已经写了代码来解决
-            nms_idx = (
-                torchvision.ops.nms(boxes_filt, scores, self.alg_args.iou_threshold)
-                .numpy()
-                .tolist()
-            )
-            nms_idx_copy = copy.deepcopy(nms_idx)
-            for index in person_index_after_insert_in_pred_result:
-                if index not in nms_idx:
-                    nms_idx_copy.append(index)
-            nms_idx = sorted(nms_idx_copy)
-            boxes_filt = boxes_filt[nms_idx]
-            pred_phrases = [pred_phrases[idx] for idx in nms_idx]
-            # SAM inference
-            self.sam_model.set_image(image_cv2_rgb)
-            transformed_boxes = self.sam_model.transform.apply_boxes_torch(
-                boxes_filt, image_cv2_rgb.shape[:2]
-            ).to(self.alg_args.device)
-            masks, _, _ = self.sam_model.predict_torch(
-                point_coords=None,
-                point_labels=None,
-                boxes=transformed_boxes,
-                multimask_output=False,
-            )
-            # draw output image
-            masks = masks.cpu().squeeze(1).numpy()
-            masks_info = []
-            for mask, pred_phrase in zip(masks, pred_phrases):
-                area = np.count_nonzero(mask)
-                H, W = mask.shape
-                mask_info = {
-                    "segmentation": mask,
-                    # "segmentation": mask.reshape((1, H, W)),
-                    "area": area,
-                    "pred_class": pred_phrase,
-                    "bbox": [0, 0, 0, 0],
-                }
-                masks_info.append(mask_info)
-            sv_detections = sv.Detections.from_sam(masks_info)
-            image_area = H * W
-            # 如果下面这行进行判断要解注释的话，需要保证person不会因为这个条件筛掉
-            # max_area_mask = (
-            #     sv_detections.area / image_area
-            # ) < self.alg_args.max_area_percentage  # 这一行可以用于帮助排除背景物体，目前max_area_percentage，就是背景物体也要
-            # sv_detections = sv_detections[max_area_mask]
-            ## draw masks
-            # 画mask要先画大mask再画小mask，不然如果大小mask重合的话，比如person和face，大mask会覆盖小mask
-            # image_viz, sorted_masks_info = self._draw_masks(masks, pred_phrases, image_viz)
-            mask_annotator = sv.MaskAnnotator(
-                color_lookup=sv.ColorLookup.INDEX, opacity=self.alg_args.mask_opacity
-            )
-            image_viz = mask_annotator.annotate(
-                scene=image_viz, detections=sv_detections
-            )
-            ## draw lables
-            # self._draw_label(sorted_masks_info, self.alg_args.label_mode, image_viz)
-            label_annotator = sv.LabelAnnotator(
-                color_lookup=sv.ColorLookup.INDEX,
-                text_position=sv.Position.DISTANT_TO_BOUNDARY,
-                text_scale=0.4,  # text的大小
-                text_color=sv.Color.WHITE,
-                color=sv.Color.BLACK,
-                text_thickness=1,
-                text_padding=1,  # 文字左边或右边单边padding多少个像素
-                smart_position=True,
-            )
-            # TODO: label type根据场景变化
-            labels = [str(i) for i in range(len(sv_detections))]
-            image_viz = label_annotator.annotate(
-                scene=image_viz, detections=sv_detections, labels=labels
-            )
+            labels = []  # 等同于SoM index
+            pred_phrases = []
+            central_pixel_points = []
+            if ram_tags != "":
+                # Grounded DINO inference
+                image_transform_pipeline = T.Compose(
+                    [
+                        T.RandomResize([800], max_size=1333),
+                        T.ToTensor(),
+                        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                    ]
+                )
+                image_to_grounded, _ = image_transform_pipeline(
+                    image_pil, None
+                )  # 3, h, w
+                boxes_filt, scores, pred_phrases = self._get_grounding_output(
+                    self.grounded_model,
+                    image_to_grounded,
+                    ram_tags,
+                    self.alg_args.box_threshold,
+                    self.alg_args.text_threshold,
+                    device=self.alg_args.device,
+                )
+                size = image_pil.size
+                H, W = size[1], size[0]
+                for i in range(boxes_filt.size(0)):
+                    boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+                    boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+                    boxes_filt[i][2:] += boxes_filt[i][:2]
+                boxes_filt = boxes_filt.cpu()
+                ## use NMS to handle overlapped boxes
+                # 在这里加入face_and_person中检测得到的bbox
+                person_index_after_insert_in_pred_result = [
+                    i
+                    for i in range(
+                        len(boxes_filt),
+                        len(boxes_filt)
+                        + len(
+                            self.face_person_detect_result.person_bboxes_xyxy_and_ids
+                        ),
+                    )
+                ]
+                for (
+                    bbox_xyxy_and_id
+                ) in (
+                    self.face_person_detect_result.person_bboxes_xyxy_and_ids
+                ):  # 接收到的列表里没有人这个loop也能处理
+                    person_bbox_tensor = torch.tensor(
+                        bbox_xyxy_and_id.bbox_xyxy,
+                        dtype=boxes_filt.dtype,
+                        device=boxes_filt.device,
+                    ).unsqueeze(0)
+                    boxes_filt = torch.cat((boxes_filt, person_bbox_tensor), dim=0)
+                    scores = torch.cat(scores, torch.tensor([1]), dim=0)
+                    pred_phrases.append("person(1.00)")
+                # （face and person既没检测到人，Grounded DINO又没有检测到超过threshold的物体）的相反情况
+                if len(pred_phrases) != 0:
+                    # 这里有个问题，就是检测的bbox会不会相互之间会非最大抑制，这个问题已经写了代码来解决
+                    nms_idx = (
+                        torchvision.ops.nms(
+                            boxes_filt, scores, self.alg_args.iou_threshold
+                        )
+                        .numpy()
+                        .tolist()
+                    )
+                    nms_idx_copy = copy.deepcopy(nms_idx)
+                    for index in person_index_after_insert_in_pred_result:
+                        if index not in nms_idx:
+                            nms_idx_copy.append(index)
+                    nms_idx = sorted(nms_idx_copy)
+                    boxes_filt = boxes_filt[nms_idx]
+                    pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+                    # （face and person既没检测到人，nms后没有超过threshold的物体）的相反情况
+                    if len(pred_phrases) != 0:
+                        # 这里假设对于给定的一个bbox，SAM总能推理出一个mask，不存在不返回mask的情况
+                        # SAM inference
+                        self.sam_model.set_image(image_cv2_rgb)
+                        transformed_boxes = self.sam_model.transform.apply_boxes_torch(
+                            boxes_filt, image_cv2_rgb.shape[:2]
+                        ).to(self.alg_args.device)
+                        masks, _, _ = self.sam_model.predict_torch(
+                            point_coords=None,
+                            point_labels=None,
+                            boxes=transformed_boxes,
+                            multimask_output=False,
+                        )
+                        # draw output image
+                        masks = masks.cpu().squeeze(1).numpy()
+                        masks_info = []
+                        for mask, pred_phrase in zip(masks, pred_phrases):
+                            area = np.count_nonzero(mask)
+                            H, W = mask.shape
+                            mask_info = {
+                                "segmentation": mask,
+                                # "segmentation": mask.reshape((1, H, W)),
+                                "area": area,
+                                "pred_class": pred_phrase,
+                                "bbox": [0, 0, 0, 0],
+                            }
+                            masks_info.append(mask_info)
+                        sv_detections = sv.Detections.from_sam(masks_info)
+                        image_area = H * W
+                        # 如果下面这行进行判断要解注释的话，需要保证person不会因为这个条件筛掉
+                        # max_area_mask = (
+                        #     sv_detections.area / image_area
+                        # ) < self.alg_args.max_area_percentage  # 这一行可以用于帮助排除背景物体，目前max_area_percentage，就是背景物体也要
+                        # sv_detections = sv_detections[max_area_mask]
+                        ## draw masks
+                        # 画mask要先画大mask再画小mask，不然如果大小mask重合的话，比如person和face，大mask会覆盖小mask
+                        # image_viz, sorted_masks_info = self._draw_masks(masks, pred_phrases, image_viz)
+                        mask_annotator = sv.MaskAnnotator(
+                            color_lookup=sv.ColorLookup.INDEX,
+                            opacity=self.alg_args.mask_opacity,
+                        )
+                        image_viz = mask_annotator.annotate(
+                            scene=image_viz, detections=sv_detections
+                        )
+                        ## draw lables/draw index
+                        # self._draw_label(sorted_masks_info, self.alg_args.label_mode, image_viz)
+                        label_annotator = sv.LabelAnnotator(
+                            color_lookup=sv.ColorLookup.INDEX,
+                            text_position=sv.Position.DISTANT_TO_BOUNDARY,
+                            text_scale=0.4,  # text的大小
+                            text_color=sv.Color.WHITE,
+                            color=sv.Color.BLACK,
+                            text_thickness=1,
+                            text_padding=1,  # 文字左边或右边单边padding多少个像素
+                            smart_position=True,
+                        )
+                        # TODO: label type根据场景变化
+                        labels = [str(i) for i in range(len(sv_detections))]
+                        image_viz, label_pixel_background_position_xyxy_list = (
+                            label_annotator.annotate(
+                                scene=image_viz, detections=sv_detections, labels=labels
+                            )
+                        )
+
+                        for (
+                            label_pixel_background_position_xyxy
+                        ) in label_pixel_background_position_xyxy_list:
+                            x1, y1, x2, y2 = label_pixel_background_position_xyxy
+                            central_pixel_point = [
+                                int((x1 + x2) / 2),
+                                int((y1 + y2) / 2),
+                            ]
+                            central_pixel_points.append(central_pixel_point)
+                    else:
+                        # nothing needs to handle
+                        pass
+                else:
+                    # nothing needs to handle
+                    pass
+            else:
+                if len(track_id_list) != 0:
+                    raise Exception("RAM Error!")
 
             # pub msg
             SoM_result = SoM()
-            SoM_result.seq_id = self.person_detect_result.seq_id
+            SoM_result.seq_id = self.face_person_detect_result.seq_id
             SoM_result.SoM_image = self.bridge.cv2_to_imgmsg(image_viz, encoding="bgr8")
-            SoM_result.color_image = self.person_detect_result.color_image
-            SoM_result.depth_image = self.person_detect_result.depth_image
-            person_length = len(self.person_detect_result.bboxes_xyxy_and_ids)
+            SoM_result.color_image = self.face_person_detect_result.color_image
+            SoM_result.depth_image = self.face_person_detect_result.depth_image
+            person_length = len(
+                self.face_person_detect_result.person_bboxes_xyxy_and_ids
+            )
             object_length = len(pred_phrases) - person_length
+
             SoM_result.object_index_pairs = []
-            for label, pred_phrase in zip(
-                labels[:object_length], pred_phrases[:object_length]
-            ):
-                object_index_pair = ObjectIndexPair()
-                object_index_pair.index = label
-                object_index_pair.object_name = pred_phrase.split("(")[0]
-                SoM_result.object_index_pairs.append(object_index_pair)
+            if object_length != 0:
+                for label, pred_phrase, central_pixel_point in zip(
+                    labels[:object_length],
+                    pred_phrases[:object_length],
+                    central_pixel_points[:object_length],
+                ):
+                    object_index_pair = ObjectIndexPair()
+                    object_index_pair.index = label
+                    object_index_pair.object_name = pred_phrase.split("(")[0]
+                    object_index_pair.central_pixel_point = central_pixel_point
+                    SoM_result.object_index_pairs.append(object_index_pair)
 
             SoM_result.track_id_index_pairs = []
-            for label, track_id in zip(labels[object_length:], track_id_list):
-                track_id_index_pair = TrackIDIndexPair()
-                track_id_index_pair.track_id = track_id
-                track_id_index_pair.index = label
+            if person_length != 0:
+                face_detect_result = {}
+                for (
+                    face_bbox_xyxy_and_id
+                ) in self.face_person_detect_result.face_bboxes_xyxy_and_ids:
+                    face_detect_result[face_bbox_xyxy_and_id.track_id] = (
+                        face_bbox_xyxy_and_id.bbox_xyxy
+                    )
+                for label, track_id, central_pixel_point in zip(
+                    labels[object_length:],
+                    track_id_list,
+                    central_pixel_points[object_length:],
+                ):
+                    track_id_index_pair = TrackIDIndexPair()
+                    track_id_index_pair.track_id = track_id
+                    track_id_index_pair.index = label
+                    face_bbox_xyxy = face_detect_result.get(track_id, None)
+                    # 如果没有检测到这个人的脸，就先设定看向这个人的person bbox中心吧
+                    if face_bbox_xyxy is not None:
+                        x1, y1, x2, y2 = face_bbox_xyxy
+                        central_pixel_point = [int((x1 + x2) / 2), int((y1 + y2) / 2)]
+                    track_id_index_pair.central_pixel_point = central_pixel_point
+                    SoM_result.track_id_index_pairs.append(track_id_index_pair)
 
             self.pub_SoM_result.publish(SoM_result)
 

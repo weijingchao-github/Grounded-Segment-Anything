@@ -1094,7 +1094,7 @@ class LabelAnnotator(BaseAnnotator):
             custom_color_lookup=custom_color_lookup,
         )
 
-        return scene
+        return scene, xyxy
 
     def _validate_labels(self, labels: Optional[List[str]], detections: Detections):
         if labels is not None and len(labels) != len(detections):
