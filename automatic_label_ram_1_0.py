@@ -38,9 +38,16 @@ import sys
 
 path = os.path.dirname(__file__)
 sys.path.insert(0, path)
+os.system("export HF_ENDPOINT=https://hf-mirror.com")
+sys.path.insert(
+    0,
+    "/home/zxr/Documents/wjc/HRI/project/gaze_point_select_ws/devel/lib/python3/dist-packages",
+)
+sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
 
 import copy
 import threading
+import time
 from types import SimpleNamespace
 
 import cv2
@@ -94,17 +101,22 @@ class RamGroundedSam:
             sam_checkpoint=os.path.join(
                 os.path.dirname(__file__), "checkpoints/sam_vit_h_4b8939.pth"
             ),
+            bert_model_path=os.path.join(
+                os.path.dirname(__file__), "checkpoints/bert-base-uncased"
+            ),
             # box_threshold=0.05,
             box_threshold=0.25,
             # text_threshold=0.05,
             text_threshold=0.2,
             iou_threshold=0.5,
+            ram_threshold=0.68,
             device="cuda",
             label_mode="1",
             max_area_percentage=1,
             mask_opacity=0.4,
+            human_part=["face", "hand", "shirt"],
         )
-        self.enable_viz = False
+        self.viz_flag = False
         self.recv_counter = 0
         audio_image_pub_frequency = rospy.get_param("/pub_frequency")
         duration = rospy.get_param("/llm_inferecnce_duration")
@@ -114,7 +126,10 @@ class RamGroundedSam:
         # model init
         # RAM model
         self.ram_model = ram(
-            pretrained=self.alg_args.ram_checkpoint, image_size=384, vit="swin_l"
+            pretrained=self.alg_args.ram_checkpoint,
+            image_size=384,
+            vit="swin_l",
+            threshold=self.alg_args.ram_threshold,
         )
         self.ram_model.eval()
         self.ram_model.to(self.alg_args.device)
@@ -162,12 +177,13 @@ class RamGroundedSam:
     def _load_grounded_model(self, model_config_path, model_checkpoint_path, device):
         args = SLConfig.fromfile(model_config_path)
         args.device = device
+        args.bert_base_uncased_path = self.alg_args.bert_model_path
         model = build_model(args)
         checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
         load_res = model.load_state_dict(
             clean_state_dict(checkpoint["model"]), strict=False
         )
-        # print(load_res)
+        print(load_res)
         _ = model.eval()
         return model
 
@@ -231,7 +247,8 @@ class RamGroundedSam:
 
     def _inference(self):
         while self.thread_running:
-            if self.do_inference_flag:
+            if not self.do_inference_flag:
+                time.sleep(0.001)
                 continue
             self.do_inference_flag = False
 
@@ -250,6 +267,15 @@ class RamGroundedSam:
             ram_tags = ram_inference_result[0].replace(
                 " |", ","
             )  # 人并不单纯的只是person，还有man, woman, businessman什么的
+
+            for human_part in self.alg_args.human_part:
+                if (human_part + ", ") in ram_tags:
+                    ram_tags = ram_tags.replace(human_part + ", ", "")
+                if (", " + human_part) in ram_tags:
+                    ram_tags = ram_tags.replace(", " + human_part, "")
+                if human_part in ram_tags:
+                    ram_tags = ram_tags.replace(human_part, "")
+
             ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
 
             track_id_list = []
@@ -262,6 +288,7 @@ class RamGroundedSam:
             labels = []  # 等同于SoM index
             pred_phrases = []
             central_pixel_points = []
+            person_track_id_index = []
             if ram_tags != "":
                 # Grounded DINO inference
                 image_transform_pipeline = T.Compose(
@@ -282,6 +309,17 @@ class RamGroundedSam:
                     self.alg_args.text_threshold,
                     device=self.alg_args.device,
                 )
+                pred_phrases_ = (
+                    []
+                )  # 只留一个类别名称，不然可能会将多个同义的ram识别出的名称拼在一起，作为bbox检测结果，比如"shirt sweatshirt wear(0.43)"
+                for pred_phrase in pred_phrases:
+                    if len(pred_phrase.split(" ")) == 1:
+                        pred_phrases_.append(pred_phrase.split(" ")[0])
+                    else:
+                        former_part = pred_phrase.split(" ")[0]
+                        latter_part = "(" + pred_phrase.split("(")[1]
+                        pred_phrases_.append(former_part + latter_part)
+                pred_phrases = pred_phrases_
                 size = image_pil.size
                 H, W = size[1], size[0]
                 for i in range(boxes_filt.size(0)):
@@ -301,18 +339,20 @@ class RamGroundedSam:
                         ),
                     )
                 ]
-                for (
-                    bbox_xyxy_and_id
-                ) in (
+                for index, bbox_xyxy_and_id in enumerate(
                     self.face_person_detect_result.person_bboxes_xyxy_and_ids
                 ):  # 接收到的列表里没有人这个loop也能处理
+                    track_id = bbox_xyxy_and_id.track_id
+                    person_track_id_index.append(
+                        [track_id, person_index_after_insert_in_pred_result[index]]
+                    )
                     person_bbox_tensor = torch.tensor(
                         bbox_xyxy_and_id.bbox_xyxy,
                         dtype=boxes_filt.dtype,
                         device=boxes_filt.device,
                     ).unsqueeze(0)
                     boxes_filt = torch.cat((boxes_filt, person_bbox_tensor), dim=0)
-                    scores = torch.cat(scores, torch.tensor([1]), dim=0)
+                    scores = torch.cat((scores, torch.tensor([1])), dim=0)
                     pred_phrases.append("person(1.00)")
                 # （face and person既没检测到人，Grounded DINO又没有检测到超过threshold的物体）的相反情况
                 if len(pred_phrases) != 0:
@@ -331,6 +371,11 @@ class RamGroundedSam:
                     nms_idx = sorted(nms_idx_copy)
                     boxes_filt = boxes_filt[nms_idx]
                     pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+                    person_index_in_nms_result = []
+                    if len(person_index_after_insert_in_pred_result) != 0:
+                        person_index_in_nms_result = list(range(len(nms_idx)))[
+                            -1 * len(person_index_after_insert_in_pred_result) :
+                        ]
                     # （face and person既没检测到人，nms后没有超过threshold的物体）的相反情况
                     if len(pred_phrases) != 0:
                         # 这里假设对于给定的一个bbox，SAM总能推理出一个mask，不存在不返回mask的情况
@@ -359,7 +404,28 @@ class RamGroundedSam:
                                 "bbox": [0, 0, 0, 0],
                             }
                             masks_info.append(mask_info)
+                        # 这里会打乱masks_info的顺序，从mask面积大的向mask面积小的排
                         sv_detections = sv.Detections.from_sam(masks_info)
+                        sorted_masks_info = sorted(
+                            masks_info, key=lambda x: x["area"], reverse=True
+                        )
+                        masks_info_index = list(range(len(masks_info)))
+                        masks_info_area = []
+                        for mask_info, mask_info_index in zip(
+                            masks_info, masks_info_index
+                        ):
+                            masks_info_area.append([mask_info_index, mask_info["area"]])
+                        sorted_result = sorted(
+                            masks_info_area, key=lambda x: x[1], reverse=True
+                        )
+                        sorted_index = [result[0] for result in sorted_result]
+                        for i, index in enumerate(person_index_in_nms_result):
+                            new_index = sorted_index.index(index)
+                            person_track_id_index[i][1] = new_index
+                        pred_phrases_ = []
+                        for sorted_mask_info in sorted_masks_info:
+                            pred_phrases_.append(sorted_mask_info["pred_class"])
+                        pred_phrases = pred_phrases_
                         image_area = H * W
                         # 如果下面这行进行判断要解注释的话，需要保证person不会因为这个条件筛掉
                         # max_area_mask = (
@@ -421,53 +487,83 @@ class RamGroundedSam:
             SoM_result.SoM_image = self.bridge.cv2_to_imgmsg(image_viz, encoding="bgr8")
             SoM_result.color_image = self.face_person_detect_result.color_image
             SoM_result.depth_image = self.face_person_detect_result.depth_image
-            person_length = len(
-                self.face_person_detect_result.person_bboxes_xyxy_and_ids
-            )
-            object_length = len(pred_phrases) - person_length
 
-            SoM_result.object_index_pairs = []
-            if object_length != 0:
-                for label, pred_phrase, central_pixel_point in zip(
-                    labels[:object_length],
-                    pred_phrases[:object_length],
-                    central_pixel_points[:object_length],
-                ):
-                    object_index_pair = ObjectIndexPair()
-                    object_index_pair.index = label
-                    object_index_pair.object_name = pred_phrase.split("(")[0]
-                    object_index_pair.central_pixel_point = central_pixel_point
-                    SoM_result.object_index_pairs.append(object_index_pair)
-
-            SoM_result.track_id_index_pairs = []
-            if person_length != 0:
-                face_detect_result = {}
+            face_detect_result = {}
+            if len(self.face_person_detect_result.person_bboxes_xyxy_and_ids) != 0:
                 for (
                     face_bbox_xyxy_and_id
                 ) in self.face_person_detect_result.face_bboxes_xyxy_and_ids:
                     face_detect_result[face_bbox_xyxy_and_id.track_id] = (
                         face_bbox_xyxy_and_id.bbox_xyxy
                     )
-                for label, track_id, central_pixel_point in zip(
-                    labels[object_length:],
-                    track_id_list,
-                    central_pixel_points[object_length:],
-                ):
+
+            SoM_result.object_index_pairs = []
+            SoM_result.track_id_index_pairs = []
+            person_index = [
+                track_id_index[1] for track_id_index in person_track_id_index
+            ]
+            for label_str in labels:
+                label = int(label_str)
+                if label not in person_index:
+                    object_index_pair = ObjectIndexPair()
+                    object_index_pair.index = label
+                    object_index_pair.object_name = pred_phrases[label].split("(")[0]
+                    object_index_pair.central_pixel_point = central_pixel_points[label]
+                    SoM_result.object_index_pairs.append(object_index_pair)
+                elif label in person_index:
+                    track_id = -1
                     track_id_index_pair = TrackIDIndexPair()
+                    for track_id_index in person_track_id_index:
+                        if label == track_id_index[1]:
+                            track_id = track_id_index[0]
+                            break
                     track_id_index_pair.track_id = track_id
                     track_id_index_pair.index = label
-                    face_bbox_xyxy = face_detect_result.get(track_id, None)
                     # 如果没有检测到这个人的脸，就先设定看向这个人的person bbox中心吧
+                    central_pixel_point = central_pixel_points[label]
+                    face_bbox_xyxy = face_detect_result.get(track_id, None)
                     if face_bbox_xyxy is not None:
                         x1, y1, x2, y2 = face_bbox_xyxy
-                        central_pixel_point = [int((x1 + x2) / 2), int((y1 + y2) / 2)]
+                        central_pixel_point = [
+                            int((x1 + x2) / 2),
+                            int((y1 + y2) / 2),
+                        ]
                     track_id_index_pair.central_pixel_point = central_pixel_point
                     SoM_result.track_id_index_pairs.append(track_id_index_pair)
 
             self.pub_SoM_result.publish(SoM_result)
 
-            if self.enable_viz:
-                cv2.imshow("image", image_viz)
+            if self.viz_flag:
+                # object
+                index_object_name_str = "object: "
+                for object_index_pair in SoM_result.object_index_pairs:
+                    cv2.circle(
+                        image_viz,
+                        object_index_pair.central_pixel_point,
+                        radius=1,
+                        color=(0, 0, 255),
+                        thickness=-1,
+                    )  # 物体用绿色的点
+                    index_object_name_str += (
+                        f"{object_index_pair.index}-{object_index_pair.object_name}, "
+                    )
+                # print(index_object_name_str)
+                # person
+                index_track_id_str = "person: "
+                for track_id_index_pair in SoM_result.track_id_index_pairs:
+                    cv2.circle(
+                        image_viz,
+                        track_id_index_pair.central_pixel_point,
+                        radius=1,
+                        color=(0, 255, 0),
+                        thickness=-1,
+                    )  # 人用红色的点
+                    index_track_id_str += (
+                        f"{track_id_index_pair.index}-{track_id_index_pair.track_id}, "
+                    )
+                # print(index_track_id_str)
+                # SoM image
+                cv2.imshow("SoM_image", image_viz)
                 cv2.waitKey(1)
 
 
