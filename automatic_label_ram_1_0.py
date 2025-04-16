@@ -256,6 +256,7 @@ class RamGroundedSam:
                 self.face_person_detect_result.color_image, desired_encoding="bgr8"
             )  # image color
             image_viz = copy.deepcopy(image_raw)
+            image_height, image_width, _ = image_viz.shape
             image_cv2_rgb = cv2.cvtColor(image_raw, cv2.COLOR_BGR2RGB)
             image_pil = PIL.Image.fromarray(image_cv2_rgb)
             # RAM inference
@@ -308,7 +309,7 @@ class RamGroundedSam:
                     self.alg_args.box_threshold,
                     self.alg_args.text_threshold,
                     device=self.alg_args.device,
-                )
+                )  # 推理得到的bbox坐标X,Y可能出现小于0的情况
                 pred_phrases_ = (
                     []
                 )  # 只留一个类别名称，不然可能会将多个同义的ram识别出的名称拼在一起，作为bbox检测结果，比如"shirt sweatshirt wear(0.43)"
@@ -466,10 +467,11 @@ class RamGroundedSam:
                             label_pixel_background_position_xyxy
                         ) in label_pixel_background_position_xyxy_list:
                             x1, y1, x2, y2 = label_pixel_background_position_xyxy
-                            central_pixel_point = [
-                                int((x1 + x2) / 2),
-                                int((y1 + y2) / 2),
-                            ]
+                            X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
+                            X = X if X <= image_width - 1 else int(image_width - 1)
+                            Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
+                            Y = Y if Y <= image_height - 1 else int(image_height - 1)
+                            central_pixel_point = [X, Y]
                             central_pixel_points.append(central_pixel_point)
                     else:
                         # nothing needs to handle
@@ -524,10 +526,11 @@ class RamGroundedSam:
                     face_bbox_xyxy = face_detect_result.get(track_id, None)
                     if face_bbox_xyxy is not None:
                         x1, y1, x2, y2 = face_bbox_xyxy
-                        central_pixel_point = [
-                            int((x1 + x2) / 2),
-                            int((y1 + y2) / 2),
-                        ]
+                        X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
+                        X = X if X <= image_width - 1 else int(image_width - 1)
+                        Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
+                        Y = Y if Y <= image_height - 1 else int(image_height - 1)
+                        central_pixel_point = [X, Y]
                     track_id_index_pair.central_pixel_point = central_pixel_point
                     SoM_result.track_id_index_pairs.append(track_id_index_pair)
 
