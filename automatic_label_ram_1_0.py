@@ -105,7 +105,8 @@ class RamGroundedSam:
                 os.path.dirname(__file__), "checkpoints/bert-base-uncased"
             ),
             # box_threshold=0.05,
-            box_threshold=0.25,
+            # box_threshold=0.25,
+            box_threshold=0.2,
             # text_threshold=0.05,
             text_threshold=0.2,
             iou_threshold=0.5,
