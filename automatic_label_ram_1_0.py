@@ -128,6 +128,7 @@ class RamGroundedSam:
         self.ram_model = ram(
             pretrained=self.alg_args.ram_checkpoint,
             image_size=384,
+            text_encoder_type=self.alg_args.bert_model_path,
             vit="swin_l",
             threshold=self.alg_args.ram_threshold,
         )

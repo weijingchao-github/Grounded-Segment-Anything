@@ -31,6 +31,7 @@ class AddMask:
         # add mask
         data_folder_name = rospy.get_param("/data_folder_name")
         video_name = rospy.get_param("/video_name")
+        times = rospy.get_param("/times")
         video_name = video_name.split(".mp4")[0]
         current_file_path = os.path.abspath(__file__)
         save_path = os.path.join(
@@ -38,7 +39,7 @@ class AddMask:
             + "/experiment/"
             + data_folder_name
             + "/save_result",
-            video_name,
+            video_name + f"/{times}",
         )
         vlm_inference_raw_image_path = os.path.join(
             save_path, "vlm_inference_raw_image"
@@ -57,6 +58,16 @@ class AddMask:
                     break
                 bbox_xyxy = line.split()
                 if len(bbox_xyxy) == 0:
+                    image_viz = cv2.imread(
+                        os.path.join(vlm_inference_raw_image_path, f"{cnt}.jpg")
+                    )
+                    if self.viz_flag:
+                        cv2.imshow("image_viz", image_viz)
+                        cv2.waitKey(1000)
+                    cv2.imwrite(
+                        os.path.join(gaze_point_target_mask_image_path, f"{cnt}.jpg"),
+                        image_viz,
+                    )
                     cnt += 1
                     continue
                 image_raw = cv2.imread(

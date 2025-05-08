@@ -58,6 +58,7 @@ import matplotlib.colors as mplc
 import numpy as np
 import PIL
 import rospy
+import sensor_msgs.msg._Image
 
 # from supervision import supervision as sv
 import supervision as sv
@@ -109,7 +110,7 @@ class RamGroundedSam:
                 os.path.dirname(__file__), "checkpoints/bert-base-uncased"
             ),
             # box_threshold=0.05,
-            box_threshold=0.25,
+            box_threshold=0.2,
             # text_threshold=0.05,
             text_threshold=0.2,
             iou_threshold=0.5,
@@ -132,6 +133,7 @@ class RamGroundedSam:
         self.ram_model = ram(
             pretrained=self.alg_args.ram_checkpoint,
             image_size=384,
+            text_encoder_type=self.alg_args.bert_model_path,
             vit="swin_l",
             threshold=self.alg_args.ram_threshold,
         )
@@ -174,10 +176,14 @@ class RamGroundedSam:
         self.loop_thread.join()
 
     def _process_recv_msg(self, face_person_detect_result):
+        # print(face_person_detect_result.color_image.header.seq)
         self.recv_counter += 1
         if self.recv_counter == self.per_seq_recv_times:
             self.do_inference_flag = True
             self.face_person_detect_result = face_person_detect_result
+            # print()
+            # print(self.face_person_detect_result.color_image.header.seq)
+            # print()
             self.recv_counter = 0
 
     def _load_grounded_model(self, model_config_path, model_checkpoint_path, device):
@@ -347,6 +353,7 @@ class RamGroundedSam:
                         ),
                     )
                 ]
+                # print(self.face_person_detect_result.person_bboxes_xyxy_and_ids)
                 for index, bbox_xyxy_and_id in enumerate(
                     self.face_person_detect_result.person_bboxes_xyxy_and_ids
                 ):  # 接收到的列表里没有人这个loop也能处理
