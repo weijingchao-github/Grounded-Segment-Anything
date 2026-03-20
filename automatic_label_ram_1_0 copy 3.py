@@ -475,12 +475,16 @@ class RamGroundedSam:
                         )
                         # TODO: label type根据场景变化
                         labels = [str(i) for i in range(len(sv_detections))]
-                        image_viz, _ = label_annotator.annotate(
-                            scene=image_viz, detections=sv_detections, labels=labels
+                        image_viz, label_pixel_background_position_xyxy_list = (
+                            label_annotator.annotate(
+                                scene=image_viz, detections=sv_detections, labels=labels
+                            )
                         )
 
-                        for bbox in boxes_filt:
-                            x1, y1, x2, y2 = bbox.tolist()
+                        for (
+                            label_pixel_background_position_xyxy
+                        ) in label_pixel_background_position_xyxy_list:
+                            x1, y1, x2, y2 = label_pixel_background_position_xyxy
                             X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
                             X = X if X <= image_width - 1 else int(image_width - 1)
                             Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0

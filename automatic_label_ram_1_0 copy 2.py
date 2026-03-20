@@ -115,24 +115,7 @@ class RamGroundedSam:
             label_mode="1",
             max_area_percentage=1,
             mask_opacity=0.4,
-            human_part=[
-                "face",
-                "hand",
-                "shirt",
-                "sweatshirt",
-                "man",
-                "woman",
-                "boy",
-                "girl",
-                "child",
-                "businessman",
-                "person",
-                "people",
-                "adult",
-                "kid",
-                "student",
-                "paper",
-            ],
+            human_part=["face", "hand", "shirt"],
         )
         self.viz_flag = False
         self.recv_counter = 0
@@ -287,12 +270,14 @@ class RamGroundedSam:
             ram_tags = ram_inference_result[0].replace(
                 " |", ","
             )  # 人并不单纯的只是person，还有man, woman, businessman什么的
-            ram_tags = [tag.strip() for tag in ram_tags.split(",") if tag.strip() != ""]
-            ram_tags = [
-                tag for tag in ram_tags if tag.lower() not in self.alg_args.human_part
-            ]
-            ram_tags = ["bottle", "phone"]
-            ram_tags = ", ".join(ram_tags)
+
+            for human_part in self.alg_args.human_part:
+                if (human_part + ", ") in ram_tags:
+                    ram_tags = ram_tags.replace(human_part + ", ", "")
+                if (", " + human_part) in ram_tags:
+                    ram_tags = ram_tags.replace(", " + human_part, "")
+                if human_part in ram_tags:
+                    ram_tags = ram_tags.replace(human_part, "")
 
             ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
 
@@ -475,12 +460,16 @@ class RamGroundedSam:
                         )
                         # TODO: label type根据场景变化
                         labels = [str(i) for i in range(len(sv_detections))]
-                        image_viz, _ = label_annotator.annotate(
-                            scene=image_viz, detections=sv_detections, labels=labels
+                        image_viz, label_pixel_background_position_xyxy_list = (
+                            label_annotator.annotate(
+                                scene=image_viz, detections=sv_detections, labels=labels
+                            )
                         )
 
-                        for bbox in boxes_filt:
-                            x1, y1, x2, y2 = bbox.tolist()
+                        for (
+                            label_pixel_background_position_xyxy
+                        ) in label_pixel_background_position_xyxy_list:
+                            x1, y1, x2, y2 = label_pixel_background_position_xyxy
                             X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
                             X = X if X <= image_width - 1 else int(image_width - 1)
                             Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
