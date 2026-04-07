@@ -58,6 +58,7 @@ import matplotlib.colors as mplc
 import numpy as np
 import PIL
 import rospy
+import sensor_msgs.msg._Image
 
 # from supervision import supervision as sv
 import supervision as sv
@@ -118,24 +119,7 @@ class RamGroundedSam:
             label_mode="1",
             max_area_percentage=1,
             mask_opacity=0.4,
-            human_part=[
-                "face",
-                "hand",
-                "shirt",
-                "sweatshirt",
-                "man",
-                "woman",
-                "boy",
-                "girl",
-                "child",
-                "businessman",
-                "person",
-                "people",
-                "adult",
-                "kid",
-                "student",
-                "paper",
-            ],
+            human_part=["face", "hand", "shirt"],
         )
         self.viz_flag = False
         self.recv_counter = 0
@@ -296,12 +280,14 @@ class RamGroundedSam:
             ram_tags = ram_inference_result[0].replace(
                 " |", ","
             )  # 人并不单纯的只是person，还有man, woman, businessman什么的
-            ram_tags = [tag.strip() for tag in ram_tags.split(",") if tag.strip() != ""]
-            ram_tags = [
-                tag for tag in ram_tags if tag.lower() not in self.alg_args.human_part
-            ]
-            # ram_tags = ["box", "bottle"]
-            ram_tags = ", ".join(ram_tags)
+
+            for human_part in self.alg_args.human_part:
+                if (human_part + ", ") in ram_tags:
+                    ram_tags = ram_tags.replace(human_part + ", ", "")
+                if (", " + human_part) in ram_tags:
+                    ram_tags = ram_tags.replace(", " + human_part, "")
+                if human_part in ram_tags:
+                    ram_tags = ram_tags.replace(human_part, "")
 
             ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
 
@@ -441,6 +427,15 @@ class RamGroundedSam:
                         sorted_masks_info = sorted(
                             masks_info, key=lambda x: x["area"], reverse=True
                         )
+
+                        for mask_info in sorted_masks_info:
+                            x1, y1, x2, y2 = mask_info["bbox"]
+                            x1 = max(int(x1), 0)
+                            y1 = max(int(y1), 0)
+                            x2 = min(int(x2), int(image_width - 1))
+                            y2 = min(int(y2), int(image_height - 1))
+                            bboxes_xyxy.append([x1, y1, x2, y2])
+
                         masks_info_index = list(range(len(masks_info)))
                         masks_info_area = []
                         for mask_info, mask_info_index in zip(
@@ -454,7 +449,6 @@ class RamGroundedSam:
                         for i, index in enumerate(person_index_in_nms_result):
                             new_index = sorted_index.index(index)
                             person_track_id_index[i][1] = new_index
-                        boxes_filt = boxes_filt[sorted_index]
                         pred_phrases_ = []
                         for sorted_mask_info in sorted_masks_info:
                             pred_phrases_.append(sorted_mask_info["pred_class"])
@@ -489,17 +483,16 @@ class RamGroundedSam:
                         )
                         # TODO: label type根据场景变化
                         labels = [str(i) for i in range(len(sv_detections))]
-                        image_viz, _ = label_annotator.annotate(
-                            scene=image_viz, detections=sv_detections, labels=labels
+                        image_viz, label_pixel_background_position_xyxy_list = (
+                            label_annotator.annotate(
+                                scene=image_viz, detections=sv_detections, labels=labels
+                            )
                         )
 
-                        for bbox in boxes_filt:
-                            x1, y1, x2, y2 = bbox.tolist()
-                            x1 = max(int(x1), 0)
-                            y1 = max(int(y1), 0)
-                            x2 = min(int(x2), int(image_width - 1))
-                            y2 = min(int(y2), int(image_height - 1))
-                            bboxes_xyxy.append([x1, y1, x2, y2])
+                        for (
+                            label_pixel_background_position_xyxy
+                        ) in label_pixel_background_position_xyxy_list:
+                            x1, y1, x2, y2 = label_pixel_background_position_xyxy
                             X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
                             X = X if X <= image_width - 1 else int(image_width - 1)
                             Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
@@ -523,17 +516,8 @@ class RamGroundedSam:
             SoM_result.color_image = self.face_person_detect_result.color_image
             SoM_result.depth_image = self.face_person_detect_result.depth_image
 
-            person_detect_result = {}
-            if len(self.face_person_detect_result.person_bboxes_xyxy_and_ids) != 0:
-                for (
-                    person_bbox_xyxy_and_id
-                ) in self.face_person_detect_result.person_bboxes_xyxy_and_ids:
-                    person_detect_result[person_bbox_xyxy_and_id.track_id] = (
-                        person_bbox_xyxy_and_id.bbox_xyxy
-                    )
-
             face_detect_result = {}
-            if len(self.face_person_detect_result.face_bboxes_xyxy_and_ids) != 0:
+            if len(self.face_person_detect_result.person_bboxes_xyxy_and_ids) != 0:
                 for (
                     face_bbox_xyxy_and_id
                 ) in self.face_person_detect_result.face_bboxes_xyxy_and_ids:
@@ -543,7 +527,6 @@ class RamGroundedSam:
 
             SoM_result.object_index_pairs = []
             SoM_result.track_id_index_pairs = []
-            human_like_object_names = {"man", "woman", "boy", "girl", "child"}
             person_index = [
                 track_id_index[1] for track_id_index in person_track_id_index
             ]
@@ -553,16 +536,7 @@ class RamGroundedSam:
                     object_index_pair = ObjectIndexPair_validation()
                     object_index_pair.index = label
                     object_index_pair.object_name = pred_phrases[label].split("(")[0]
-                    central_pixel_point = central_pixel_points[label]
-                    if object_index_pair.object_name.lower() in human_like_object_names:
-                        x1, y1, x2, y2 = bboxes_xyxy[label]
-                        X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
-                        X = X if X <= image_width - 1 else int(image_width - 1)
-                        Y = int(y1 + 0.1 * (y2 - y1))
-                        Y = Y if Y >= 0 else 0
-                        Y = Y if Y <= image_height - 1 else int(image_height - 1)
-                        central_pixel_point = [X, Y]
-                    object_index_pair.central_pixel_point = central_pixel_point
+                    object_index_pair.central_pixel_point = central_pixel_points[label]
                     object_index_pair.bbox_xyxy = bboxes_xyxy[label]
                     SoM_result.object_index_pairs.append(object_index_pair)
                 elif label in person_index:
@@ -574,26 +548,16 @@ class RamGroundedSam:
                             break
                     track_id_index_pair.track_id = track_id
                     track_id_index_pair.index = label
-                    # 如果没有检测到这个人的脸，就回退到person bbox靠近头部的中心点
+                    # 如果没有检测到这个人的脸，就先设定看向这个人的person bbox中心吧
                     central_pixel_point = central_pixel_points[label]
-                    face_bbox_xyxy = face_detect_result.get(track_id, None)
-                    if face_bbox_xyxy is not None:
-                        x1, y1, x2, y2 = face_bbox_xyxy
-                        X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
-                        X = X if X <= image_width - 1 else int(image_width - 1)
-                        Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
-                        Y = Y if Y <= image_height - 1 else int(image_height - 1)
-                        central_pixel_point = [X, Y]
-                    else:
-                        person_bbox_xyxy = person_detect_result.get(track_id, None)
-                        if person_bbox_xyxy is not None:
-                            x1, y1, x2, y2 = person_bbox_xyxy
-                            X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
-                            X = X if X <= image_width - 1 else int(image_width - 1)
-                            Y = int(y1 + 0.1 * (y2 - y1))
-                            Y = Y if Y >= 0 else 0
-                            Y = Y if Y <= image_height - 1 else int(image_height - 1)
-                            central_pixel_point = [X, Y]
+                    # face_bbox_xyxy = face_detect_result.get(track_id, None)
+                    # if face_bbox_xyxy is not None:
+                    #     x1, y1, x2, y2 = face_bbox_xyxy
+                    #     X = int((x1 + x2) / 2) if int((x1 + x2) / 2) >= 0 else 0
+                    #     X = X if X <= image_width - 1 else int(image_width - 1)
+                    #     Y = int((y1 + y2) / 2) if int((y1 + y2) / 2) >= 0 else 0
+                    #     Y = Y if Y <= image_height - 1 else int(image_height - 1)
+                    #     central_pixel_point = [X, Y]
                     track_id_index_pair.central_pixel_point = central_pixel_point
                     track_id_index_pair.bbox_xyxy = bboxes_xyxy[label]
                     SoM_result.track_id_index_pairs.append(track_id_index_pair)

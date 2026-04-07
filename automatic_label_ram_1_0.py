@@ -291,7 +291,8 @@ class RamGroundedSam:
             ram_tags = [
                 tag for tag in ram_tags if tag.lower() not in self.alg_args.human_part
             ]
-            ram_tags = ["bottle", "phone"]
+            # ram_tags = ["bottle", "phone"]
+            # ram_tags = ["box", "bottle"]
             ram_tags = ", ".join(ram_tags)
 
             ram_tags_chinese = ram_inference_result[1].replace(" |", ",")
